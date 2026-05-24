@@ -1,4 +1,5 @@
 #include <Cocoa/Cocoa.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <functional>
 
 #include "spdlog/spdlog.h"
@@ -116,36 +117,67 @@ static NSString *bundleIdentifier = @"unity.Blizzard Entertainment.Hearthstone";
     emit self.listener->onAppTerminate();
 }
 
+// Fallback that uses Quartz CGWindowList — works for Metal/SDL fullscreen
+// game windows that don't show up in the Accessibility windows enumeration.
+- (QRect)getWindowLocationViaCGWindowList {
+    if (self.pid == 0) {
+        return QRect();
+    }
+    CFArrayRef windowList = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+    if (windowList == nullptr) {
+        return QRect();
+    }
+    QRect largest;
+    for (CFIndex i = 0, n = CFArrayGetCount(windowList); i < n; ++i) {
+        CFDictionaryRef info = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
+        CFNumberRef pidRef = (CFNumberRef)CFDictionaryGetValue(info, kCGWindowOwnerPID);
+        pid_t winPid = 0;
+        if (pidRef) CFNumberGetValue(pidRef, kCFNumberSInt32Type, &winPid);
+        if (winPid != self.pid) continue;
+        CFDictionaryRef boundsRef = (CFDictionaryRef)CFDictionaryGetValue(info, kCGWindowBounds);
+        if (!boundsRef) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation(boundsRef, &bounds)) continue;
+        QRect r((int)bounds.origin.x, (int)bounds.origin.y,
+                (int)bounds.size.width, (int)bounds.size.height);
+        // Pick the largest window owned by this PID (the main game window)
+        if ((long long)r.width() * r.height() > (long long)largest.width() * largest.height()) {
+            largest = r;
+        }
+    }
+    CFRelease(windowList);
+    return largest;
+}
+
 - (QRect)getWindowLocation {
-    if (self.hearthstoneWindowRef == nullptr) {
-        return QRect();
+    // Prefer Accessibility (fires move/resize events). Fall back to CGWindowList
+    // when AX can't see the window — typical for fullscreen Metal/SDL games.
+    if (self.hearthstoneWindowRef != nullptr) {
+        CFTypeRef positionValue = nullptr;
+        CFTypeRef sizeValue = nullptr;
+        if (AXUIElementCopyAttributeValue(self.hearthstoneWindowRef, kAXPositionAttribute, &positionValue) ==
+                kAXErrorSuccess &&
+            AXUIElementCopyAttributeValue(self.hearthstoneWindowRef, kAXSizeAttribute, &sizeValue) ==
+                kAXErrorSuccess) {
+            QRect result;
+            CGPoint position;
+            CGSize size;
+            if (AXValueGetType((AXValueRef)positionValue) == kAXValueTypeCGPoint &&
+                AXValueGetType((AXValueRef)sizeValue) == kAXValueTypeCGSize) {
+                AXValueGetValue((AXValueRef)positionValue, kAXValueTypeCGPoint, &position);
+                AXValueGetValue((AXValueRef)sizeValue, kAXValueTypeCGSize, &size);
+                result = QRect((int)position.x, (int)position.y, (int)size.width, (int)size.height);
+            }
+            CFRelease(positionValue);
+            CFRelease(sizeValue);
+            if (!result.isNull()) return result;
+        } else {
+            if (positionValue) CFRelease(positionValue);
+        }
     }
-
-    CFTypeRef positionValue = nullptr;
-    CFTypeRef sizeValue = nullptr;
-
-    if (AXUIElementCopyAttributeValue(self.hearthstoneWindowRef, kAXPositionAttribute, &positionValue) !=
-        kAXErrorSuccess) {
-        return QRect();
-    }
-    if (AXUIElementCopyAttributeValue(self.hearthstoneWindowRef, kAXSizeAttribute, &sizeValue) != kAXErrorSuccess) {
-        CFRelease(positionValue);
-        return QRect();
-    }
-
-    QRect result;
-    CGPoint position;
-    CGSize size;
-    if (AXValueGetType((AXValueRef)positionValue) == kAXValueTypeCGPoint &&
-        AXValueGetType((AXValueRef)sizeValue) == kAXValueTypeCGSize) {
-        AXValueGetValue((AXValueRef)positionValue, kAXValueTypeCGPoint, &position);
-        AXValueGetValue((AXValueRef)sizeValue, kAXValueTypeCGSize, &size);
-        result = QRect((int)position.x, (int)position.y, (int)size.width, (int)size.height);
-    }
-
-    CFRelease(positionValue);
-    CFRelease(sizeValue);
-    return result;
+    return [self getWindowLocationViaCGWindowList];
 }
 
 - (void)startRetrySetupListener:(pid_t)pid {
