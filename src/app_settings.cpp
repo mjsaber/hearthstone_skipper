@@ -1,4 +1,5 @@
 #include "app_settings.h"
+#include "spdlog/spdlog.h"
 
 AppSettings::AppSettings() : _settings(QSettings()) {
 }
@@ -6,6 +7,14 @@ AppSettings::AppSettings() : _settings(QSettings()) {
 // rm ~/Library/Preferences/com.z2z63-dev.skipper.plist
 // killall -u $USER cfprefsd
 std::optional<ClashConfig> AppSettings::clash_config() const {
+    auto _dbg = spdlog::get("skipper");
+    if (_dbg) {
+        _dbg->info("[diag] clash_config(): plist values: type=[{}] ec=[{}] secret=[{}] sock=[{}]",
+            _settings.value("external_controller_type").toString().toStdString(),
+            _settings.value("external_controller").toString().toStdString(),
+            _settings.value("secret").toString().toStdString(),
+            _settings.value("unix_socket").toString().toStdString());
+    }
     QVariant unix_socket_ = _settings.value("unix_socket");
     QVariant external_controller = _settings.value("external_controller");
     QVariant secret = _settings.value("secret");
@@ -26,9 +35,11 @@ std::optional<ClashConfig> AppSettings::clash_config() const {
             .unix_socket = unix_socket_.toString().toStdString(),
         });
     }
-    if (external_controller_type_ == "TCPIP") {
+    if (external_controller_type == "TCPIP") {  // FIX: compare QString, not QVariant
         // 使用 TCP 连接 clash 核心，external_controller 必填
-        if (external_controller.isValid() || external_controller.toString().isEmpty()) {
+        // FIX: original `external_controller.isValid() ||` was inverted —
+        // it short-circuited whenever the field was set. Should be !isValid.
+        if (!external_controller.isValid() || external_controller.toString().isEmpty()) {
             return {};
         }
         return std::optional(ClashConfig{
