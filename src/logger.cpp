@@ -47,4 +47,5 @@ void initLogger() {
 #endif
     spdlog::register_logger(logger);
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] [%@] %v");
+    logger->flush_on(spdlog::level::trace);  // FIX: force flush every line
 }
